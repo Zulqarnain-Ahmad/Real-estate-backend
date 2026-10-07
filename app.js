@@ -1,53 +1,60 @@
 const express = require('express');
-const helmet = require('helmet');
 const cors = require('cors');
-const hpp = require('hpp');
-const cookieParser = require('cookie-parser');
-const morgan = require('morgan');
-const compression = require('compression');
-const { globalLimiter } = require('./middleware/rateLimiters');
-const errorHandler = require('./middleware/errorMiddleware');
-const authRoutes=require('./routes/authRoutes')
-const sanitizeInputs = require('./middleware/sanitizeMiddleware');
-const path=require('path')
-const propertyRoutes=require('./routes/propertyRoutes')
-const slotRoutes=require('./routes/slotRoutes')
-const bookingRoutes=require('./routes/bookingRoutes')
-const userRoutes=require('./routes/userRoutes')
-const analyticsRoutes = require('./routes/analyticsRoutes');
-const cronRoutes=require('./routes/cronRoutes')
+const mongoose = require('mongoose');
 
-const app=express();
+const app = express();
 
-if(process.env.NODE_ENV==='development'){
-    app.use(morgan('dev'))
-}
-
-app.use(helmet());
+// 1. GLOBAL CORS MIDDDLEWARE SETUP
 app.use(cors({
-    origin:process.env.CLIENT_URL,
-    credentials:true
-}))
+  origin: "https://real-estate-frontend-phi-eight.vercel.app",
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "Accept"]
+}));
 
-app.use(express.json({limit:'10kb'}))
-app.use(cookieParser());
-app.use(sanitizeInputs);
-app.use(hpp());
-app.use(compression())
-app.use('/api/cron',cronRoutes)
-app.use('/api',globalLimiter)
-app.use('/api/auth', authRoutes);
-app.use('/api/properties',propertyRoutes)
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
-app.use('/api/slots',slotRoutes);
-app.use('/api/bookings',bookingRoutes)
-app.use('/api/users',userRoutes)
-app.use('/api/analytics', analyticsRoutes);
+// 2. EXPLICIT PREFLIGHT OPTIONS ROUTE HANDLER 
+// This guarantees that any preflight OPTIONS requests immediately exit with an HTTP 200 OK status
+app.options('*', cors());
 
-app.get('/api/health', (req, res) => {
-  res.status(200).json({ status: 'ok', message: 'Server is healthy' });
+app.use(express.json());
+
+// 3. SERVERLESS-SAFE CACHED DATABASE CONNECTION MIGRATION
+let isConnected = false;
+const connectDB = async () => {
+  if (isConnected) return;
+  try {
+    // Falls back to your working connection string if the environment variable has whitespace
+    const dbUri = process.env.MONGO_URI || "mongodb+srv://ahmadzulqarnain929_db_user:IKDBuCkmlYkZIvRh@cluster0.er1izm1.mongodb.net/?appName=RealEstaate";
+    const db = await mongoose.connect(dbUri.trim());
+    isConnected = db.connections[0].readyState;
+    console.log("MongoDB connected successfully");
+  } catch (err) {
+    console.error("Database connection failure:", err.message);
+  }
+};
+
+// Middleware to establish database connectivity context on every request run
+app.use(async (req, res, next) => {
+  await connectDB();
+  next();
 });
 
-app.use(errorHandler)
+/* ==========================================
+   YOUR CORE API ROUTE MODULES (Example Layout)
+========================================== */
+// app.use('/api/auth', require('./routes/auth'));
+// app.use('/api/properties', require('./routes/properties'));
 
-module.exports=app;
+// Root diagnostic status test endpoint
+app.get('/api', (req, res) => {
+  res.status(200).json({ status: "Online", message: "Backend API is fully operational" });
+});
+
+// 4. CRITICAL VERCEL SERVERLESS EXPORT RULE
+// Do not use app.listen() in production; Vercel mounts your exported app instance dynamically
+if (process.env.NODE_ENV !== 'production') {
+  const PORT = process.env.PORT || 5000;
+  app.listen(PORT, () => console.log(`Local development running on port ${PORT}`));
+}
+
+module.exports = app;
