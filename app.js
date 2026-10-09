@@ -1,60 +1,85 @@
 const express = require('express');
+const helmet = require('helmet');
 const cors = require('cors');
-const mongoose = require('mongoose');
+const hpp = require('hpp');
+const cookieParser = require('cookie-parser');
+const morgan = require('morgan');
+const compression = require('compression');
+
+const connectDB = require('./config/db');
+const AppError = require('./utils/AppError');
+const { globalLimiter } = require('./middleware/rateLimiters');
+const errorHandler = require('./middleware/errorMiddleware');
+const sanitizeInputs = require('./middleware/sanitizeMiddleware');
+
+const authRoutes = require('./routes/authRoutes');
+const propertyRoutes = require('./routes/propertyRoutes');
+const slotRoutes = require('./routes/slotRoutes');
+const bookingRoutes = require('./routes/bookingRoutes');
+const userRoutes = require('./routes/userRoutes');
+const analyticsRoutes = require('./routes/analyticsRoutes');
+const cronRoutes = require('./routes/cronRoutes');
 
 const app = express();
 
-// 1. GLOBAL CORS MIDDDLEWARE SETUP
-app.use(cors({
-  origin: "https://real-estate-frontend-phi-eight.vercel.app",
-  credentials: true,
-  methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "Accept"]
-}));
+// Vercel sits behind a proxy; this makes req.ip (and rate limiting) use the real visitor IP
+app.set('trust proxy', 1);
 
-// 2. EXPLICIT PREFLIGHT OPTIONS ROUTE HANDLER 
-// This guarantees that any preflight OPTIONS requests immediately exit with an HTTP 200 OK status
-app.options('*', cors());
-
-app.use(express.json());
-
-// 3. SERVERLESS-SAFE CACHED DATABASE CONNECTION MIGRATION
-let isConnected = false;
-const connectDB = async () => {
-  if (isConnected) return;
-  try {
-    // Falls back to your working connection string if the environment variable has whitespace
-    const dbUri = process.env.MONGO_URI || "mongodb+srv://ahmadzulqarnain929_db_user:IKDBuCkmlYkZIvRh@cluster0.er1izm1.mongodb.net/?appName=RealEstaate";
-    const db = await mongoose.connect(dbUri.trim());
-    isConnected = db.connections[0].readyState;
-    console.log("MongoDB connected successfully");
-  } catch (err) {
-    console.error("Database connection failure:", err.message);
-  }
-};
-
-// Middleware to establish database connectivity context on every request run
-app.use(async (req, res, next) => {
-  await connectDB();
-  next();
-});
-
-/* ==========================================
-   YOUR CORE API ROUTE MODULES (Example Layout)
-========================================== */
-// app.use('/api/auth', require('./routes/auth'));
-// app.use('/api/properties', require('./routes/properties'));
-
-// Root diagnostic status test endpoint
-app.get('/api', (req, res) => {
-  res.status(200).json({ status: "Online", message: "Backend API is fully operational" });
-});
-
-// 4. CRITICAL VERCEL SERVERLESS EXPORT RULE
-// Do not use app.listen() in production; Vercel mounts your exported app instance dynamically
-if (process.env.NODE_ENV !== 'production') {
-  const PORT = process.env.PORT || 5000;
-  app.listen(PORT, () => console.log(`Local development running on port ${PORT}`));
+if (process.env.NODE_ENV === 'development') {
+  app.use(morgan('dev'));
 }
+
+app.use(helmet());
+
+// Strip any trailing slash so "https://site.vercel.app/" still matches the browser's origin
+const allowedOrigin = (process.env.CLIENT_URL || '').replace(/\/+$/, '');
+
+app.use(
+  cors({
+    origin: allowedOrigin,
+    credentials: true,
+  })
+);
+
+// Health check: no database needed, so it works even if the DB is down
+app.get('/api/health', (req, res) => {
+  res.status(200).json({ status: 'ok', message: 'Server is healthy' });
+});
+
+app.use(express.json({ limit: '10kb' }));
+app.use(cookieParser());
+app.use(sanitizeInputs);
+app.use(hpp());
+app.use(compression());
+
+app.use('/api', globalLimiter);
+
+// Connect to the database only for requests that need it (cached after the first connection)
+app.use(async (req, res, next) => {
+  if (req.method === 'OPTIONS') return next();
+
+  try {
+    await connectDB();
+    next();
+  } catch (err) {
+    next(new AppError('Database connection failed. Please try again shortly.', 503));
+  }
+});
+
+app.use('/api/auth', authRoutes);
+app.use('/api/properties', propertyRoutes);
+app.use('/api/slots', slotRoutes);
+app.use('/api/bookings', bookingRoutes);
+app.use('/api/users', userRoutes);
+app.use('/api/analytics', analyticsRoutes);
+app.use('/api/cron', cronRoutes);
+
+// Unknown routes return a clean JSON 404 instead of Express's default HTML page
+app.use((req, res, next) => {
+  next(new AppError(`Route not found: ${req.originalUrl}`, 404));
+});
+
+// Must stay last
+app.use(errorHandler);
 
 module.exports = app;
